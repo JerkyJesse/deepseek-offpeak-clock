@@ -61,4 +61,4 @@ Produces `dist/OffPeakClock.exe` (single file).
 
 ## License
 
-[MIT](LICENSE)
+Dual-licensed: [PolyForm Noncommercial 1.0.0](LICENSE) for noncommercial use, or a [commercial license](COMMERCIAL.md) for any commercial purpose. Contact: mechapip@mechapip.com
