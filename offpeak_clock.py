@@ -9,24 +9,89 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Rate schedule (exact spec):
-# Peak = 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday (UTC day).
-# All other hours are off-peak. No holiday exceptions.
+# Rate schedule (DeepSeek API, per the 2026-09-19 peak/off-peak clarification):
+# Peak = Beijing time (UTC+8) Monday-Friday 09:00-12:00 and 14:00-18:00,
+# excluding Chinese statutory holidays. Everything else is off-peak: the
+# 12:00-14:00 break and nights, weekends in full (including 调休 make-up
+# workdays that fall on a weekend) and holidays in full. In UTC the peak
+# windows are Monday-Friday 01:00-04:00 and 06:00-10:00.
+#
+# Holiday dates are the State Council official rest periods for 2026
+# (国办发明电〔2025〕7号). Later years can be added at runtime through the
+# "holidays" list in offpeak_clock.json.
+# Sources:
+#   https://api-docs.deepseek.com/quick_start/pricing
+#   https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm
 # ---------------------------------------------------------------------------
+
+CN_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _dates(*iso_days):
+    return frozenset(datetime.date.fromisoformat(s) for s in iso_days)
+
+
+CN_HOLIDAYS = {
+    2026: _dates(
+        "2026-01-01", "2026-01-02", "2026-01-03",                        # New Year
+        "2026-02-15", "2026-02-16", "2026-02-17", "2026-02-18",
+        "2026-02-19", "2026-02-20", "2026-02-21", "2026-02-22",
+        "2026-02-23",                                                    # Spring Festival
+        "2026-04-04", "2026-04-05", "2026-04-06",                        # Qingming
+        "2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04",
+        "2026-05-05",                                                    # Labor Day
+        "2026-06-19", "2026-06-20", "2026-06-21",                        # Dragon Boat
+        "2026-09-25", "2026-09-26", "2026-09-27",                        # Mid-Autumn
+        "2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04",
+        "2026-10-05", "2026-10-06", "2026-10-07",                        # National Day
+    ),
+}
+
+USER_HOLIDAYS = set()
+
+SCAN_DAYS = 29
+
+
+def _to_dates(value) -> set:
+    days = set()
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str):
+                try:
+                    days.add(datetime.date.fromisoformat(item.strip()))
+                except ValueError:
+                    pass
+    return days
+
+
+def _clean_holidays(value) -> list:
+    return sorted(day.isoformat() for day in _to_dates(value))
+
+
+def set_user_holidays(days) -> None:
+    USER_HOLIDAYS.clear()
+    USER_HOLIDAYS.update(days)
+
+
+def is_holiday(day: datetime.date) -> bool:
+    return day in CN_HOLIDAYS.get(day.year, ()) or day in USER_HOLIDAYS
 
 
 def is_peak(now_utc: datetime.datetime) -> bool:
-    hour = now_utc.hour
-    if not ((1 <= hour < 4) or (6 <= hour < 10)):
+    now = now_utc.astimezone(CN_TZ)
+    hour = now.hour
+    if not ((9 <= hour < 12) or (14 <= hour < 18)):
         return False
-    return now_utc.weekday() < 5
+    if now.weekday() >= 5:
+        return False
+    return not is_holiday(now.date())
 
 
 def next_switch(now_utc: datetime.datetime):
     """Return (switch_time, target_state) for the next peak/off-peak boundary."""
     current = is_peak(now_utc)
     day0 = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    for days in range(0, 8):
+    for days in range(SCAN_DAYS):
         day = day0 + datetime.timedelta(days=days)
         for h in (1, 4, 6, 10):
             cand = day + datetime.timedelta(hours=h)
@@ -171,6 +236,7 @@ class PeakClock:
         self._drag_off = (0, 0)
 
         cfg = self._load_config()
+        set_user_holidays(_to_dates(cfg.get("holidays", [])))
         self.topmost = tk.BooleanVar(value=cfg.get("topmost", True))
         self.autostart = tk.BooleanVar(value=_autostart_enabled())
         x, y = _clamp_pos(cfg.get("pos", DEFAULT_POS))
@@ -221,8 +287,13 @@ class PeakClock:
             for key in ("topmost",):
                 if key in cfg and not isinstance(cfg[key], bool):
                     cfg.pop(key, None)
+            holidays = _clean_holidays(cfg.get("holidays"))
+            if holidays:
+                cfg["holidays"] = holidays
+            else:
+                cfg.pop("holidays", None)
             # Drop legacy keys from pre-exact-spec versions.
-            for key in ("holidays_off", "holidays", "holiday_rules"):
+            for key in ("holidays_off", "holiday_rules"):
                 cfg.pop(key, None)
             return cfg
         except Exception:
@@ -230,20 +301,11 @@ class PeakClock:
 
     def _save_config(self):
         try:
-            cfg = {}
-            try:
-                cfg = json.loads(config_path().read_text(encoding="utf-8"))
-                if not isinstance(cfg, dict):
-                    cfg = {}
-            except Exception:
-                cfg = {}
+            cfg = self._load_config()
             cfg.update({
                 "pos": (self.root.winfo_x(), self.root.winfo_y()),
                 "topmost": bool(self.topmost.get()),
             })
-            # Drop legacy keys from pre-exact-spec versions.
-            for key in ("holidays_off", "holidays", "holiday_rules"):
-                cfg.pop(key, None)
             config_path().write_text(json.dumps(cfg), encoding="utf-8")
         except Exception:
             pass
@@ -319,6 +381,8 @@ class PeakClock:
             self.root.configure(bg=bg)
             self.label.configure(bg=bg, fg=FG)
             status = "PEAK" if peak else "OFF-PEAK"
+            if not peak and is_holiday(now.astimezone(CN_TZ).date()):
+                status += " (CN holiday)"
             local = now.astimezone()
             switch, target = next_switch(now)
             countdown = ""
