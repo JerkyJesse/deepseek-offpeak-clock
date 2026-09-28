@@ -1,5 +1,7 @@
 # OffPeakClock
 
+<img src="docs/icon.png" alt="OffPeakClock icon" width="120" align="right" />
+
 A tiny always-on-top Windows widget that shows whether [DeepSeek API](https://api-docs.deepseek.com/quick_start/pricing) pricing is currently **PEAK** or **OFF-PEAK**, with a live countdown to the next switch.
 
 ![OffPeakClock](docs/screenshot.png)
